@@ -10,10 +10,11 @@
 
 Запуск:
     python3 tools/html_v_whatsapp.py презентации/вход.html презентации/выход_whatsapp.html
-Нужны: python3 -m pip install --user playwright imageio-ffmpeg
-       python3 -m playwright install chromium
+Нужны библиотеки и браузер: bash tools/ustanovka.sh
 """
 import asyncio, base64, html, mimetypes, pathlib, re, shutil, subprocess, sys, tempfile
+
+import _venv  # перезапуск под .venv проекта, если он есть
 
 FPS = 10          # кадров в секунду в GIF
 HOLD = 2.5        # секунд держим последний кадр
@@ -29,7 +30,7 @@ def ffmpeg():
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
     except ImportError:
-        sys.exit("Нет ffmpeg. Поставьте: python3 -m pip install --user imageio-ffmpeg")
+        sys.exit("Нет ffmpeg. Запустите установку: bash tools/ustanovka.sh")
 
 
 def to_gif(args, dst, width, fps=FPS, colors=128):
@@ -46,7 +47,7 @@ async def launch(p):
         try:
             return await p.chromium.launch(channel="chrome", headless=True)
         except Exception:
-            sys.exit("Нет браузера для съёмки. Поставьте: python3 -m playwright install chromium")
+            sys.exit("Нет браузера для съёмки. Запустите установку: bash tools/ustanovka.sh")
 
 
 async def record_scene(browser, scene_html, w, h, work):
@@ -91,7 +92,10 @@ def data_uri(path, mime=None):
 
 
 async def main(src_path, dst_path):
-    from playwright.async_api import async_playwright
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        sys.exit("Нужны библиотеки для съёмки. Запустите установку: bash tools/ustanovka.sh")
     src = pathlib.Path(src_path).resolve()
     base = src.parent
     page = src.read_text(encoding="utf-8")

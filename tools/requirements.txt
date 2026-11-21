@@ -1,0 +1,11 @@
+# Библиотеки инструментов. Ставит `bash tools/ustanovka.sh`. Версии не закреплены (кроме reportlab):
+# системный Python свежего Mac старый (3.9), закреплённые новые версии на нём не встанут.
+openpyxl
+xlrd
+pandas
+pypdf
+pdfplumber
+reportlab<5   # версии 5 и новее требуют Python 3.10, а на новом Mac стоит 3.9
+Pillow
+playwright
+imageio-ffmpeg

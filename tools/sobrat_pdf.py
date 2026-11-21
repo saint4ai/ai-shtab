@@ -5,13 +5,17 @@
     python3 tools/sobrat_pdf.py презентации/файл.html --knizhnaya # книжный A4
 PDF кладётся рядом с HTML, с тем же именем. Пустые листы удаляются.
 
-Нужны: python3 -m pip install --user playwright pypdf
-       python3 -m playwright install chromium   (если нет Google Chrome)
+Нужны библиотеки и браузер: bash tools/ustanovka.sh
 """
 import pathlib, sys
 
-import pypdf
-from playwright.sync_api import sync_playwright
+import _venv  # перезапуск под .venv проекта, если он есть
+
+try:
+    import pypdf
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sys.exit("Нужны библиотеки для сборки PDF. Запустите установку: bash tools/ustanovka.sh")
 
 
 def launch(p):
@@ -21,7 +25,7 @@ def launch(p):
         try:
             return p.chromium.launch(channel="chrome")
         except Exception:
-            sys.exit("Нет браузера для сборки. Поставьте: python3 -m playwright install chromium")
+            sys.exit("Нет браузера для сборки PDF. Запустите установку: bash tools/ustanovka.sh")
 
 
 def is_blank(page):
