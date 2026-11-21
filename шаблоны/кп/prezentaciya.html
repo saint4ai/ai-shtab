@@ -1,0 +1,44 @@
+<!-- Блоки КП-презентации (prezentaciya). Таблица, итоги, условия и менеджер лежат в общее.html. -->
+<!--@cover-->
+<div class="cov-top">{{mark}}<div class="brand-n">{{name}}</div></div>
+<div class="cov-card gl lg"><div class="gl-c"><div class="gl-b">
+<div class="cov-k">Коммерческое предложение</div>
+<h1 class="cov-t">{{client}}</h1>
+<p class="cov-s">{{subject}}</p>
+<hr class="hair">
+<div class="cov-m"><div><div class="lbl">Номер и дата</div><div class="to-n num">{{number}}</div></div><div class="doc-d">{{date}}</div></div>
+</div></div></div>
+<div class="cov-strip">{{icons}}</div>
+<!--@ph-->
+<header class="ph"><div><div class="ph-no num">{{no}}</div><h2>{{title}}</h2></div><div class="ph-r">{{side}}</div></header>
+<!--@about-->
+<div class="about-t gl"><div class="gl-c"><div class="gl-b">{{text}}</div></div></div>
+<!--@fact-->
+<div class="fact f{{i}} gl"><div class="gl-c"><div class="gl-b">{{icon}}<div class="fact-v num d {{size}}">{{value}}</div><div class="fact-l">{{label}}</div><hr class="hair"></div></div></div>
+<!--@groups-->
+<div class="groups">
+{{items}}
+</div>
+<!--@group-->
+<div class="grp gl"><div class="gl-c"><div class="gl-b"><div class="ic-b">{{icon}}</div><div class="grp-n">{{title}}</div><ul>{{li}}</ul></div></div></div>
+<!--@step-->
+<div class="step gl sm"><div class="gl-c"><div class="gl-b"><div class="step-g">{{glyph}}</div><div><div class="step-n">{{title}}</div><div class="step-t">{{text}}</div></div><div class="step-d"><span class="lbl">Срок</span><b class="num d">{{term}}</b></div></div></div></div>
+<!--@stepnum-->
+<span class="mark sm" aria-hidden="true">{{n}}</span>
+<!--@why-->
+<div class="why-h-wrap"><div class="lbl">Почему мы</div></div>
+<div class="why n{{count}}">
+{{items}}
+</div>
+<!--@whyitem-->
+<div class="why-i gl sm"><div class="gl-c"><div class="gl-b"><div class="why-n num d">{{n}}</div><div><div class="why-h">{{title}}</div><div class="why-t">{{text}}</div></div></div></div></div>
+<!--@lnote-->
+<div class="note gl sm"><div class="gl-c"><div class="gl-b">{{text}}</div></div></div>
+<!--@contacts-->
+<section class="ct gl lg"><div class="gl-c"><div class="gl-b">
+<div><div class="lbl">Контакты</div><div class="ct-n">{{name}}</div><div class="ct-p">{{position}}</div><div class="ct-l">{{lines}}</div></div>
+<div><div class="lbl">Компания</div><div class="ct-n">{{company}}</div><div class="ct-l">{{clines}}</div></div>
+{{branches}}
+</div></div></section>
+<!--@branches-->
+<div class="ct-b"><span class="lbl">Филиалы</span>{{text}}</div>

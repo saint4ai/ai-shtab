@@ -1,0 +1,18 @@
+<!-- Блоки КП на поставку (postavka). Таблица, итоги, условия и менеджер лежат в общее.html. -->
+<!--@hero-->
+<header class="hero gl lg"><div class="gl-c"><div class="gl-b">
+<div class="hero-top">
+{{brand}}
+<div class="doc"><div class="lbl">Коммерческое предложение</div><div class="doc-no num d {{ncls}}">{{number}}</div><div class="doc-d">{{date}}</div></div>
+</div>
+<hr class="hair">
+<div class="hero-to">
+<div class="to"><div class="lbl">Кому</div><div class="to-n">{{client}}</div><div class="to-c">{{contact}}</div></div>
+<p class="lead">{{intro}}</p>
+</div>
+</div></div></header>
+<!--@slim-->
+<header class="slim gl sm"><div class="gl-c"><div class="gl-b">
+{{brand}}
+<div class="slim-r"><span><b class="num">{{number}}</b> от {{date}}</span><span>Кому: {{client}}</span></div>
+</div></div></header>

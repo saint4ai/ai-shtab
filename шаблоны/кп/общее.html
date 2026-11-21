@@ -1,0 +1,70 @@
+<!-- Общие блоки обоих шаблонов. Каждый блок открывает комментарий, где после значка @ стоит имя блока,
+     и идёт до следующего такого комментария. Двойные фигурные скобки с ключом подставляет kp.py:
+     обычный текст он экранирует, готовую вёрстку вставляет как есть. -->
+<!--@doc-->
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=840">
+<title>{{title}}</title>
+<style>{{fonts}}</style>
+<style>{{css}}</style>
+<style>{{brand}}</style>
+</head>
+<body>
+{{pages}}
+</body>
+</html>
+<!--@page-->
+<section class="page {{cls}}">
+<div class="page-in">
+{{body}}
+</div>
+{{foot}}
+</section>
+<!--@foot-->
+<footer class="foot"><span>{{left}}</span><span>{{right}}</span></footer>
+<!--@mark-->
+<span class="mark {{size}}" aria-hidden="true">{{ini}}</span>
+<!--@logo-->
+<span class="logo-plate {{size}}"><img src="{{src}}" alt="{{alt}}"></span>
+<!--@brand-->
+<div class="brand">{{mark}}<div class="brand-t"><div class="brand-n">{{name}}</div><div class="brand-s">{{tagline}}</div></div></div>
+<!--@table-->
+<div class="tbl gl {{cls}}"><div class="gl-c"><div class="gl-b">
+<table class="items">
+<colgroup><col style="width:7mm"><col><col style="width:27mm"><col style="width:13mm"><col style="width:23mm"><col style="width:24mm"><col style="width:30mm"></colgroup>
+<thead><tr><th>№</th><th>Наименование</th><th>Размер, марка</th><th>Ед.</th><th class="r">Кол-во</th><th class="r">Цена за ед., ₸</th><th class="r">Сумма, ₸</th></tr></thead>
+<tbody>
+{{rows}}
+</tbody>
+</table>
+{{note}}
+</div></div></div>
+<!--@row-->
+<tr><td class="c-n num">{{n}}</td><td class="c-name">{{name}}</td><td class="c-size">{{size}}</td><td class="c-u">{{unit}}</td><td class="r num">{{qty}}</td><td class="r num">{{price}}</td><td class="r num sum">{{sum}}</td></tr>
+<!--@note-->
+<p class="tbl-note">{{text}}</p>
+<!--@totals-->
+<aside class="tot gl hot"><div class="gl-c"><div class="gl-b">
+{{lines}}
+<div class="tot-final"><span class="lbl">Итого к оплате</span><span class="tot-v num {{scls}}">{{total}}</span></div>
+</div></div></aside>
+<!--@totline-->
+<div class="tot-l"><span>{{label}}</span><span class="num">{{value}}</span></div>
+<!--@terms-->
+<section class="terms gl"><div class="gl-c"><div class="gl-b">
+<div class="lbl">Условия</div>
+<dl>
+{{items}}
+</dl>
+</div></div></section>
+<!--@term-->
+<dt>{{label}}</dt><dd>{{text}}</dd>
+<!--@manager-->
+<section class="mgr gl sm"><div class="gl-c"><div class="gl-b">
+<span class="ava" aria-hidden="true">{{ini}}</span>
+<div><div class="lbl">Менеджер</div><div class="mgr-n">{{name}}</div><div class="mgr-p">{{position}}</div></div>
+<div class="mgr-c">{{contacts}}</div>
+</div></div></section>
