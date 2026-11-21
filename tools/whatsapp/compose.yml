@@ -1,0 +1,57 @@
+# WhatsApp-шлюз AI-штаба: Evolution API и база сообщений на этом Mac. Сервер не нужен.
+# Адрес только локальный: http://127.0.0.1:18080. Управляет скрипт: python3 tools/whatsapp.py
+# Ключ доступа и пароль базы создаются на этом Mac при первом запуске: .private/whatsapp.env
+
+name: ai-shtab-whatsapp
+
+services:
+  evolution:
+    image: evoapicloud/evolution-api:v2.3.7  # 2.4.0 ломала привязку телефона: обновлять только после проверки
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:18080:8080"
+    env_file: ../../.private/whatsapp.env
+    environment:
+      SERVER_URL: http://127.0.0.1:18080
+      TELEMETRY_ENABLED: "false"            # без отчётов разработчикам Evolution
+      CACHE_REDIS_ENABLED: "false"          # одному номеру Redis не нужен
+      CACHE_LOCAL_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_SAVE_DATA_INSTANCE: "true"   # привязка телефона переживает перезапуск
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "true"
+      DATABASE_SAVE_MESSAGE_UPDATE: "true"
+      DATABASE_SAVE_DATA_CONTACTS: "true"
+      DATABASE_SAVE_DATA_CHATS: "true"
+      DATABASE_SAVE_DATA_HISTORIC: "true"   # история, которую телефон передаёт при привязке
+      CONFIG_SESSION_PHONE_CLIENT: AI-shtab # так шлюз назван в «Связанных устройствах» телефона
+      CONFIG_SESSION_PHONE_NAME: Chrome     # «Mac OS» + «Desktop» сервер WhatsApp обрывает (проверено 21.11.2026)
+      LOG_LEVEL: ERROR,WARN,INFO
+    volumes:
+      - instances:/evolution/instances      # ключи шифрования сессии WhatsApp
+    logging:
+      driver: local                         # журнал содержит тексты сообщений: храним мало и только здесь
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    env_file: ../../.private/whatsapp.env
+    environment:
+      POSTGRES_USER: evolution
+      POSTGRES_DB: evolution
+    volumes:
+      - pgdata:/var/lib/postgresql/data     # вся сохранённая переписка
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  instances:
+  pgdata:

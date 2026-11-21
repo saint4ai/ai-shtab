@@ -5,6 +5,9 @@
       "Bash(sudo:*)",
       "Bash(rm -rf:*)",
       "Read(./.private/**)"
+    ],
+    "ask": [
+      "Bash(python3 tools/whatsapp.py send:*)"
     ]
   },
   "hooks": {
