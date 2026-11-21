@@ -10,7 +10,9 @@
 
 inbox: для каждого нового файла ищет персональные данные. Нашёл — пишет копию «имя.обезл.ext»,
 а исходник переносит в .private/исходники/. Чистые файлы оставляет как есть. Печатает только сводку,
-содержимое файлов не печатает. Поддерживаются .xlsx (нужен openpyxl), .csv, .txt, .md.
+содержимое файлов не печатает. Поддерживаются .xlsx (нужен openpyxl), .xls, .csv, .txt, .md.
+Старый .xls сначала переводится в .xlsx (те же листы и значения, нужен xlrd), дальше как обычная таблица.
+Если замен не было, копия «имя.xlsx» остаётся рядом с исходником: с ней работают остальные инструменты.
 """
 import argparse
 import csv
@@ -106,7 +108,45 @@ def need_openpyxl():
         import openpyxl
         return openpyxl
     except ImportError:
-        sys.exit("Для .xlsx нужен openpyxl. Установите: python3 -m pip install --user openpyxl")
+        sys.exit("Для таблиц нужны библиотеки. Запустите установку: bash tools/ustanovka.sh")
+
+
+def xls_to_xlsx(path):
+    """Старый .xls в .xlsx рядом с ним: те же листы и значения, даты настоящими датами. None, если не прочитать."""
+    openpyxl = need_openpyxl()
+    try:
+        import xlrd
+    except ImportError:
+        sys.exit("Для старых таблиц .xls нужны библиотеки. Запустите установку: bash tools/ustanovka.sh")
+    out = path.with_suffix(".xlsx")
+    if out.exists():
+        out = path.with_name(f"{path.stem}_xls.xlsx")
+    try:
+        book = xlrd.open_workbook(str(path))
+    except Exception:
+        return None
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for sh in book.sheets():
+        ws = wb.create_sheet(sh.name)
+        for r in range(sh.nrows):
+            for c in range(sh.ncols):
+                t, v = sh.cell_type(r, c), sh.cell_value(r, c)
+                if t in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+                    continue
+                if t == xlrd.XL_CELL_DATE:
+                    v = xlrd.xldate_as_datetime(v, book.datemode)
+                elif t == xlrd.XL_CELL_NUMBER and v == int(v):
+                    v = int(v)  # в .xls все числа дробные; целые возвращаем целыми, чтобы ИИН и телефоны ловились
+                elif t == xlrd.XL_CELL_BOOLEAN:
+                    v = bool(v)
+                elif t == xlrd.XL_CELL_ERROR:
+                    v = xlrd.error_text_from_code.get(v, "#N/A")
+                cell = ws.cell(row=r + 1, column=c + 1, value=v)
+                if t == xlrd.XL_CELL_DATE:
+                    cell.number_format = "DD.MM.YYYY" if not (v.hour or v.minute or v.second) else "DD.MM.YYYY HH:MM"
+    wb.save(out)
+    return out
 
 
 def masked_name(path):
@@ -163,16 +203,29 @@ def inbox():
         return
     for p in new:
         mk = Masker(m, auto=True)
-        out = mask_file(p, mk)
+        src = conv = None
+        if p.suffix.lower() == ".xls":
+            src = conv = xls_to_xlsx(p)
+            if conv is None:
+                print(f"{p.name}: не удалось прочитать старую таблицу, файл оставлен как есть. Открывай, только если в нём нет данных клиентов.")
+                done.add(p.name)
+                continue
+        out = mask_file(src or p, mk)
         if out is None:
             print(f"{p.name}: формат не поддерживается, файл оставлен как есть. Открывай, только если в нём нет данных клиентов.")
         elif mk.count:
             ORIG.mkdir(parents=True, exist_ok=True)
             shutil.move(str(p), str(ORIG / p.name))
+            if conv:
+                shutil.move(str(conv), str(ORIG / conv.name))  # копия .xlsx с настоящими данными тоже убирается
             print(f"{p.name}: заменено {stat(mk.count)}. Работай с «{out.name}», исходник убран в .private/исходники/.")
         else:
             out.unlink()
-            print(f"{p.name}: персональных данных нет, файл можно открывать.")
+            if conv:
+                done.add(conv.name)
+                print(f"{p.name}: персональных данных нет. Перевёл в новый формат: работай с «{conv.name}».")
+            else:
+                print(f"{p.name}: персональных данных нет, файл можно открывать.")
         done.add(p.name)
     DONE.write_text("\n".join(sorted(done)), encoding="utf-8")
     save_map(m)
@@ -181,9 +234,16 @@ def inbox():
 def mask(path, columns, kind):
     m = load_map()
     mk = Masker(m, columns=columns, kind=kind)
-    out = mask_file(path, mk)
+    conv = None
+    if path.suffix.lower() == ".xls":
+        conv = xls_to_xlsx(path)
+        if conv is None:
+            sys.exit(f"Не удалось прочитать {path.name}: файл повреждён или это не таблица Excel")
+    out = mask_file(conv or path, mk)
+    if conv:
+        conv.unlink()  # промежуточная копия с настоящими данными не нужна
     if out is None:
-        sys.exit(f"Формат {path.suffix} не поддерживается: .xlsx, .csv, .txt, .md")
+        sys.exit(f"Формат {path.suffix} не поддерживается: .xlsx, .xls, .csv, .txt, .md")
     save_map(m)
     print(f"Готово: {out.name}. Заменено: {stat(mk.count)}")
 
@@ -229,4 +289,5 @@ def main():
 
 
 if __name__ == "__main__":
+    import _venv  # перезапуск под .venv проекта, если он есть; при импорте из whatsapp.py не нужен
     main()
