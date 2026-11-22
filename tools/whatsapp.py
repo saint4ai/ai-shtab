@@ -4,12 +4,15 @@
 Шлюз и база сообщений работают в Docker здесь же, адрес только локальный http://127.0.0.1:18080.
 Ключ доступа и пароль базы создаются при первом запуске в .private/whatsapp.env и никуда не уходят.
 Пока Mac выключен, WhatsApp держит новые сообщения у себя и отдаёт их шлюзу при следующем запуске.
-Чтение и отправка сами запускают остановленный шлюз и догружают пропущенное.
+Чтение и отправка сами запускают остановленный шлюз и догружают пропущенное. С автозапуском шлюз
+поднимается при входе в систему и раз в 15 минут проверяет себя: завис — перезапускается.
 
+  python3 tools/whatsapp.py install                  поставить Colima и Docker, поднять шлюз, включить автозапуск
   python3 tools/whatsapp.py status                   установлен ли шлюз и привязан ли телефон
   python3 tools/whatsapp.py up                       поднять шлюз и догрузить пропущенное
   python3 tools/whatsapp.py qr                       привязать телефон по QR
-  python3 tools/whatsapp.py stop                     остановить шлюз, переписка в базе сохраняется
+  python3 tools/whatsapp.py stop                     пауза: шлюз стоит, пока его не включат up, чтением или отправкой
+  python3 tools/whatsapp.py autostart on|off         автозапуск при входе в систему и проверка раз в 15 минут
   python3 tools/whatsapp.py chats [--hours 24]       чаты с сообщениями за период
   python3 tools/whatsapp.py read [ЧАТ] [--hours 24]  переписка одного чата или всех чатов за период
   python3 tools/whatsapp.py send ЧАТ --to "Имя" "текст"   только после «да» руководителя; «-» вместо текста: из stdin
@@ -22,13 +25,16 @@
 import argparse
 import base64
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
 import pathlib
+import plistlib
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -45,6 +51,11 @@ sys.stdout.reconfigure(line_buffering=True)  # ход запуска виден 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ENV = ROOT / ".private" / "whatsapp.env"
 COMPOSE = ROOT / "tools" / "whatsapp" / "compose.yml"
+PAUSE = ROOT / ".private" / "whatsapp.paused"  # после stop сторож автозапуска шлюз не поднимает
+STARTED = ROOT / ".private" / "whatsapp.started"  # шлюз хоть раз ответил: база создана, перезапуск безопасен
+LABEL = "kz.ai-shtab.whatsapp"
+PLIST = pathlib.Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+LOG = pathlib.Path.home() / "Library" / "Logs" / "ai-shtab" / "whatsapp.log"  # только состояние, без текстов
 URL = "http://127.0.0.1:18080"
 NAME = "shtab"
 NUMBER = r"\+?[\d\s()\-]{10,}"
@@ -57,20 +68,40 @@ KINDS = {"imageMessage": "фото", "videoMessage": "видео", "documentMess
 
 # ---------- шлюз: запуск, остановка, состояние ----------
 
-def run(*cmd):
-    return subprocess.run(cmd, capture_output=True, text=True)
+def run(*cmd, timeout=120):
+    """Команда с пределом по времени: зависшая виртуальная машина не должна вешать сторожа навсегда."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, "", f"{cmd[0]}: нет ответа за {timeout} с")
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(cmd, 127, "", f"{cmd[0]}: программа не найдена")
 
 
 def docker_ready():
-    return bool(shutil.which("docker")) and run("docker", "info").returncode == 0
+    return bool(shutil.which("docker")) and run("docker", "info", timeout=20).returncode == 0
+
+
+def online():
+    """Есть ли связь с серверами WhatsApp. Без неё зависанием считать нечего."""
+    try:
+        socket.create_connection(("web.whatsapp.com", 443), timeout=5).close()
+        return True
+    except OSError:
+        return False
 
 
 def start_docker():
     if docker_ready():
         return
     if shutil.which("colima"):
-        print("Запускаю Colima, до 5 минут.")
-        run("colima", "start", "--memory", "3")
+        print("Запускаю Colima. В первый раз она скачивает с GitHub образ виртуальной машины около 320 МБ: "
+              "на медленном интернете это до часа.")
+        # --ssh-config=false: Colima не дописывает свою строку в ~/.ssh/config руководителя
+        r = run("colima", "start", "--memory", "3", "--ssh-config=false", timeout=3600)
+        if r.returncode:  # прерванную загрузку Colima продолжает с того же места (curl -C -)
+            sys.exit("Colima не запустилась:\n" + (r.stderr or r.stdout)[-800:] +
+                     "\nПовторите ту же команду: загрузка продолжится с того места, где оборвалась.")
     elif pathlib.Path("/Applications/Docker.app").exists():
         run("open", "-a", "Docker")
     else:
@@ -82,9 +113,9 @@ def start_docker():
     sys.exit("Docker не запустился за 3 минуты. Выполните `colima start` или откройте Docker и посмотрите ошибку.")
 
 
-def compose(*args):
+def compose(*args, timeout=120):
     base = ["docker", "compose"] if run("docker", "compose", "version").returncode == 0 else ["docker-compose"]
-    return run(*base, "-f", str(COMPOSE), *args)
+    return run(*base, "-f", str(COMPOSE), *args, timeout=timeout)
 
 
 def alive():
@@ -127,14 +158,36 @@ def linked():
         if st != "connecting":
             return None if st is None else False
         time.sleep(2)
-    # подключение затянулось: если шлюз показывает QR, телефон не привязан. В этом состоянии connect только отдаёт QR
+    if owner():  # был привязан и переподключается: нет интернета или WhatsApp недоступен
+        return None
+    # ни разу не привязан: если шлюз показывает QR, ждёт привязки. В этом состоянии connect только отдаёт QR
     return False if (api("GET", f"/instance/connect/{NAME}") or {}).get("base64") else None
+
+
+def owner():
+    """Номер, к которому шлюз был привязан. Пусто, если телефон ни разу не привязывали."""
+    return next((i.get("ownerJid") for i in api("GET", "/instance/fetchInstances") or [] if i.get("name") == NAME), None)
 
 
 def since_wake():
     """Секунды с последнего пробуждения Mac."""
-    m = re.search(r"sec = (\d+)", run("sysctl", "-n", "kern.waketime").stdout)
+    m = re.search(r"sec = (\d+)", run("sysctl", "-n", "kern.waketime", timeout=10).stdout)
     return time.time() - int(m.group(1)) if m else 1e9
+
+
+def lock(wait):
+    """Блокировка на время команды. Сторож не ждёт: если занято, пропускает проверку. Агент ждёт."""
+    ENV.parent.mkdir(mode=0o700, exist_ok=True)
+    f = open(ENV.parent / "whatsapp.lock", "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        if not wait:
+            f.close()
+            return None
+        print("Шлюз занят другой командой (проверка или запуск), жду, пока закончит.")
+        fcntl.flock(f, fcntl.LOCK_EX)
+    return f
 
 
 def make_env():
@@ -146,19 +199,52 @@ def make_env():
 
 
 def start():
-    """Поднимает шлюз, если он не отвечает. True, если пришлось поднимать."""
+    """Поднимает шлюз, если он не отвечает. True, если пришлось поднимать.
+    Пока шлюз ни разу не ответил, идёт создание базы: его не перезапускаем, чтобы не сорвать."""
     if alive():
         return False
     start_docker()
+    PAUSE.unlink(missing_ok=True)
     print("Поднимаю шлюз WhatsApp. В первый раз скачивается около 500 МБ, это несколько минут.")
-    r = compose("up", "-d")
+    r = compose("up", "-d", timeout=1800)
     if r.returncode:
         sys.exit("Шлюз не поднялся:\n" + (r.stderr or r.stdout)[-1500:])
-    for _ in range(120):
+    for i in range(150):
         if alive():
+            STARTED.touch()
             return True
+        if i == 90 and STARTED.exists():  # 3 минуты без ответа: перезапустить шлюз один раз
+            compose("restart", "evolution")
         time.sleep(2)
-    sys.exit("Шлюз не ответил за 4 минуты. Покажи этот текст руководителю и запиши в обучение/вопросы_к_созвону.md.")
+    sys.exit("Шлюз не ответил за 5 минут. Покажи этот текст руководителю и запиши в обучение/вопросы_к_созвону.md.")
+
+
+def clock_drift():
+    """Насколько часы виртуальной машины Colima разошлись с часами Mac, в секундах. 0, если Colima не используется."""
+    if not shutil.which("colima") or run("colima", "status", timeout=30).returncode:
+        return 0
+    r = compose("exec", "-T", "evolution", "date", "+%s", timeout=30)
+    return abs(int(r.stdout.strip()) - time.time()) if r.returncode == 0 and r.stdout.strip().isdigit() else 0
+
+
+def heal():
+    """Шлюз отвечает, но завис: ушли часы виртуальной машины или связь с WhatsApp не восстанавливается."""
+    drift = clock_drift()
+    if drift > 300:  # известная ошибка Lima на vz: часы прыгают, лечится только перезапуском
+        print(f"Часы виртуальной машины разошлись с Mac на {drift:.0f} с, перезапускаю Colima.")
+        run("colima", "restart", timeout=600)
+        start()
+        catch_up()
+    elif not online():
+        print("Нет связи с серверами WhatsApp, проверка пропущена.")
+    elif linked() is None:
+        print("Связь с WhatsApp не восстанавливается, перезапускаю шлюз.")
+        compose("restart", "evolution")
+        for _ in range(60):
+            if alive():
+                break
+            time.sleep(2)
+        catch_up()
 
 
 def ensure_instance():
@@ -393,10 +479,19 @@ def cmd_status():
     if not ENV.exists():
         print("WhatsApp не подключён: шлюз не установлен. Подключите по навыку whatsapp, раздел «Поставить».")
         return 1
+    free = shutil.disk_usage("/").free / 2 ** 30
+    if free < 5:
+        print(f"Внимание: на диске Mac свободно {free:.1f} ГБ. Когда место кончится, шлюз и база остановятся.")
+    loaded = run("launchctl", "print", f"gui/{os.getuid()}/{LABEL}", timeout=10).returncode == 0
+    print("Автозапуск: включён." if loaded else "Автозапуск: выключен. Включить: python3 tools/whatsapp.py autostart on")
     if not alive():
-        print("Шлюз установлен и сейчас остановлен. Чтение и отправка запустят его сами и догрузят пропущенное.")
+        print("Шлюз на паузе после команды stop. Включить: python3 tools/whatsapp.py up" if PAUSE.exists() else
+              "Шлюз установлен и сейчас остановлен. Чтение и отправка запустят его сами и догрузят пропущенное.")
         return 0
     ok = linked()
+    if not ok and not online():
+        print("Нет связи с серверами WhatsApp: проверьте интернет. Шлюз подключится сам, когда связь появится.")
+        return 1
     if not ok:
         print("Шлюз подключается к WhatsApp, повторите через минуту." if ok is None else
               "Шлюз работает, но телефон не привязан. Привяжите: python3 tools/whatsapp.py qr")
@@ -407,12 +502,21 @@ def cmd_status():
     return 0
 
 
-def cmd_up():
+def cmd_up(auto=False):
+    """auto — запуск сторожем автозапуска: паузу не снимает, не установленный шлюз не ставит."""
+    if auto:
+        if LOG.exists() and LOG.stat().st_size > 1_000_000:  # журнал сторожа не растёт больше мегабайта
+            LOG.write_text("")
+        print(time.strftime("%d.%m %H:%M"), "проверка")
+        if PAUSE.exists() or not ENV.exists():
+            return 0
     if not ENV.exists():
         make_env()
     started = start()
     if not ensure_instance() and started:
         catch_up()
+    elif not started and since_wake() > 180:  # сразу после сна шлюз ещё переподключается, это не зависание
+        heal()
     return cmd_status()
 
 
@@ -443,27 +547,89 @@ def cmd_qr():
             time.sleep(2)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    api("DELETE", f"/instance/logout/{NAME}", check=False)  # иначе шлюз крутит QR ещё 20 минут и после перезапуска
+    if not owner():  # ни разу не привязан: остановить показ QR, иначе шлюз крутит его ещё 20 минут
+        api("DELETE", f"/instance/logout/{NAME}", check=False)  # рабочую привязку так не трогаем
     sys.exit("За 3 минуты телефон не привязан. Запустите qr ещё раз.")
 
 
 def cmd_stop():
-    if not docker_ready():
-        print("Шлюз уже остановлен.")
+    if not ENV.exists():
+        print("Шлюз не установлен.")
         return 0
-    r = compose("stop")
-    if r.returncode:
-        sys.exit("Не получилось остановить:\n" + (r.stderr or r.stdout)[-800:])
-    print("Шлюз остановлен, переписка в базе сохранена. Автозапуск его не поднимет: шлюз включится при следующем "
+    PAUSE.touch()  # пауза ставится и тогда, когда Docker уже выключен: иначе сторож поднимет шлюз
+    if docker_ready():
+        r = compose("stop")
+        if r.returncode:
+            sys.exit("Не получилось остановить:\n" + (r.stderr or r.stdout)[-800:])
+    print("Шлюз на паузе, переписка в базе сохранена. Автозапуск его не поднимет: шлюз включится при следующем "
           "чтении, отправке или up. Новые сообщения WhatsApp отдаст тогда же, если пауза меньше 30 дней.")
+    return 0
+
+
+def cmd_install():
+    """Ставит Colima и Docker через Homebrew, если нет Docker, поднимает шлюз и включает автозапуск."""
+    have = all(shutil.which(x) for x in ("colima", "docker", "docker-compose"))  # прошлая установка могла оборваться
+    if not (have or docker_ready() or pathlib.Path("/Applications/Docker.app").exists()):
+        brew = next((b for b in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew") if os.path.exists(b)), None)
+        if not brew:
+            sys.exit("Нет Homebrew. Руководитель ставит его сам: команда с https://brew.sh в приложении «Терминал», "
+                     "пароль Mac вводит он. Потом повторите: python3 tools/whatsapp.py install")
+        print("Ставлю Colima и Docker, 2–5 минут.")
+        r = run(brew, "install", "colima", "docker", "docker-compose", timeout=1800)
+        if r.returncode:
+            sys.exit("Установка не прошла:\n" + (r.stderr or r.stdout)[-1500:])
+        prof = pathlib.Path.home() / ".zprofile"  # чтобы brew, docker и colima находились и в новых сессиях
+        if "brew shellenv" not in (prof.read_text() if prof.exists() else ""):
+            with prof.open("a") as f:
+                f.write(f'\neval "$({brew} shellenv)"\n')
+    rc = cmd_up()
+    return cmd_autostart(True) or rc
+
+
+def cmd_autostart(on):
+    """Задача macOS (LaunchAgent): `up --auto` при входе в систему и раз в 15 минут."""
+    target = f"gui/{os.getuid()}/{LABEL}"
+    run("launchctl", "bootout", target, timeout=30)
+    for _ in range(10):  # bootout асинхронный: без ожидания bootstrap падает с ошибкой 5
+        if run("launchctl", "print", target, timeout=10).returncode:
+            break
+        time.sleep(1)
+    if not on:
+        PLIST.unlink(missing_ok=True)
+        print("Автозапуск выключен: шлюз включится при чтении, отправке или up.")
+        return 0
+    closed = [pathlib.Path.home() / d for d in ("Desktop", "Documents", "Downloads", "Library/Mobile Documents")]
+    if any(c == ROOT or c in ROOT.parents for c in closed):  # туда macOS не пускает фоновые задачи
+        print("Автозапуск не включён: проект лежит в папке, которую macOS закрывает для фоновых задач "
+              "(Рабочий стол, Документы, Загрузки, iCloud). Перенесите проект в ~/ai-shtab и повторите autostart on.")
+        return 1
+    PLIST.parent.mkdir(parents=True, exist_ok=True)
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    PLIST.write_bytes(plistlib.dumps({
+        "Label": LABEL,
+        "ProgramArguments": ["/usr/bin/python3", str(pathlib.Path(__file__).resolve()), "up", "--auto"],
+        "WorkingDirectory": str(ROOT),
+        "RunAtLoad": True,
+        "StartInterval": 900,
+        "StandardOutPath": str(LOG),
+        "StandardErrorPath": str(LOG),
+    }))
+    r = run("launchctl", "bootstrap", f"gui/{os.getuid()}", str(PLIST), timeout=30)
+    if r.returncode:
+        PLIST.unlink(missing_ok=True)
+        sys.exit("Автозапуск не включился, повторите autostart on:\n" + (r.stderr or r.stdout)[-500:])
+    print("Автозапуск включён: шлюз поднимается при входе в систему и раз в 15 минут проверяет себя. "
+          "macOS может показать уведомление о новом фоновом объекте python3: это он.")
     return 0
 
 
 def main():
     ap = argparse.ArgumentParser(description="WhatsApp через шлюз на этом Mac")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for c in ("status", "up", "qr", "stop"):
+    for c in ("status", "qr", "stop", "install"):
         sub.add_parser(c)
+    sub.add_parser("up").add_argument("--auto", action="store_true", help="запуск сторожем автозапуска")
+    sub.add_parser("autostart").add_argument("mode", choices=["on", "off"])
     p = sub.add_parser("chats")
     p.add_argument("--hours", type=float, default=24)
     p = sub.add_parser("read")
@@ -475,13 +641,25 @@ def main():
     p.add_argument("text")
     p.add_argument("--to", help="имя получателя, как в chats и read")
     a = ap.parse_args()
+    if a.cmd != "status":  # одна команда за раз: сторож не перезапускает шлюз посреди отправки или привязки
+        auto = a.cmd == "up" and a.auto
+        if auto and not ENV.exists():
+            return 0
+        held = lock(wait=not auto)  # noqa: F841 — блокировка держится, пока жива переменная
+        if held is None:
+            print(time.strftime("%d.%m %H:%M"), "проверка пропущена: идёт другая команда шлюза")
+            return 0
     if a.cmd == "chats":
         return cmd_chats(a.hours)
     if a.cmd == "read":
         return cmd_read(a.chat, a.hours, a.limit)
     if a.cmd == "send":
         return cmd_send(a.chat, a.to, a.text)
-    return {"status": cmd_status, "up": cmd_up, "qr": cmd_qr, "stop": cmd_stop}[a.cmd]()
+    if a.cmd == "up":
+        return cmd_up(a.auto)
+    if a.cmd == "autostart":
+        return cmd_autostart(a.mode == "on")
+    return {"status": cmd_status, "qr": cmd_qr, "stop": cmd_stop, "install": cmd_install}[a.cmd]()
 
 
 if __name__ == "__main__":
