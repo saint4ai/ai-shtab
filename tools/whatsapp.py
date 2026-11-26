@@ -16,6 +16,15 @@
   python3 tools/whatsapp.py chats [--hours 24]       чаты с сообщениями за период
   python3 tools/whatsapp.py read [ЧАТ] [--hours 24]  переписка одного чата или всех чатов за период
   python3 tools/whatsapp.py send ЧАТ --to "Имя" "текст"   только после «да» руководителя; «-» вместо текста: из stdin
+  python3 tools/whatsapp.py send ЧАТ --to "Имя" --file путь ["подпись"]   файл или фото, тоже только после «да»
+  python3 tools/whatsapp.py files [ЧАТ] [--hours 12]   скачать присланные документы и фото во «входящие»
+
+Номер агента: отдельный номер, с которого агент пишет руководителю в его группу. Так сводки приходят
+с уведомлением, а номер агента не пишет никому, кроме этой группы.
+  python3 tools/whatsapp.py qr --agent               привязать номер агента
+  python3 tools/whatsapp.py status --agent           привязан ли номер агента
+  python3 tools/whatsapp.py group                    запомнить группу: руководитель пишет в неё «сводки сюда»
+  python3 tools/whatsapp.py post "текст" [--file путь]   сводка или картинка в эту группу
 
 ЧАТ: id из списка chats, часть имени или номер телефона, если переписки ещё не было.
 --to: имя получателя, как его показывают chats и read. Скрипт сверяет его с чатом, а руководитель видит его
@@ -28,6 +37,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import json
+import mimetypes
 import os
 import pathlib
 import plistlib
@@ -58,6 +68,11 @@ PLIST = pathlib.Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 LOG = pathlib.Path.home() / "Library" / "Logs" / "ai-shtab" / "whatsapp.log"  # только состояние, без текстов
 URL = "http://127.0.0.1:18080"
 NAME = "shtab"
+AGENT = "shtab-agent"  # номер агента: пишет только в группу руководителя
+GROUP = ROOT / ".private" / "whatsapp_gruppa.json"  # группа для сводок, её выбирает руководитель словами «сводки сюда»
+FILES_DONE = ROOT / ".private" / "whatsapp_files.txt"  # id уже скачанных файлов
+INBOX = ROOT / "входящие"
+BIG = 50 * 2 ** 20  # файлы больше 50 МБ не качаем и не отправляем
 NUMBER = r"\+?[\d\s()\-]{10,}"
 # Номера, которые не ловит obezlichit.py: 7701…, «7 701 …» без плюса и иностранные с плюсом
 PHONE = re.compile(r"(?<![\w+])(?:\+\d[\d\s()\-]{8,16}\d|7[\s\-()]*\d{3}[\s\-()]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2})(?!\d)")
@@ -441,9 +456,41 @@ def cmd_read(chat, hours, limit):
     save_map(mk.m)
 
 
-def cmd_send(chat, to, text):
-    text = (sys.stdin.read() if text == "-" else text).strip()
-    if not text:
+def deliver(jid, text, file=None):
+    """Текст, а с file — документ или фото с подписью. Возвращает id сообщения."""
+    if not file:
+        return (api("POST", f"/message/sendText/{NAME}", {"number": jid, "text": text}).get("key") or {}).get("id")
+    f = pathlib.Path(file).expanduser()
+    if not f.is_file():
+        sys.exit(f"Нет файла {f}")
+    if f.stat().st_size > BIG:
+        sys.exit(f"{f.name} больше 50 МБ, отправлять не буду. Сожмите файл или отправьте ссылку.")
+    mime = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
+    body = {"number": jid, "mediatype": "image" if mime.startswith("image/") else "document", "mimetype": mime,
+            "fileName": f.name, "media": base64.b64encode(f.read_bytes()).decode()}
+    if text:
+        body["caption"] = text
+    return (api("POST", f"/message/sendMedia/{NAME}", body).get("key") or {}).get("id")
+
+
+def status_of(mid):
+    status = "в очереди"
+    for _ in range(10):
+        time.sleep(1)
+        rec = api("POST", f"/chat/findMessages/{NAME}", {"where": {"key": {"id": mid}}, "offset": 1})["messages"]["records"]
+        got = {u.get("status") for u in (rec[0].get("MessageUpdate") or [])} if rec else set()
+        if got & {"READ", "PLAYED"}:
+            return "прочитано"
+        if "DELIVERY_ACK" in got:
+            return "доставлено"
+        if "SERVER_ACK" in got:
+            status = "сервер WhatsApp принял"
+    return status
+
+
+def cmd_send(chat, to, text, file=None):
+    text = (sys.stdin.read() if text == "-" else text or "").strip()
+    if not text and not file:
         sys.exit("Пустой текст, отправлять нечего.")
     ok = ready()
     mk = Masker(load_map())
@@ -455,22 +502,118 @@ def cmd_send(chat, to, text):
                  f"и повтори с --to \"{name}\".")
     if not ok:
         sys.exit("Телефон не привязан к шлюзу, отправить нельзя. Привяжите: python3 tools/whatsapp.py qr")
-    mid = (api("POST", f"/message/sendText/{NAME}", {"number": jid, "text": text}).get("key") or {}).get("id")
-    status = "в очереди"
-    for _ in range(10):
-        time.sleep(1)
-        rec = api("POST", f"/chat/findMessages/{NAME}", {"where": {"key": {"id": mid}}, "offset": 1})["messages"]["records"]
-        got = {u.get("status") for u in (rec[0].get("MessageUpdate") or [])} if rec else set()
-        if got & {"READ", "PLAYED"}:
-            status = "прочитано"
-            break
-        if "DELIVERY_ACK" in got:
-            status = "доставлено"
-            break
-        if "SERVER_ACK" in got:
-            status = "сервер WhatsApp принял"
-    print(f"Отправлено: {name}. Статус: {status}.")
+    mid = deliver(jid, text, file)
+    print(f"Отправлено: {name}. Статус: {status_of(mid)}.")
     save_map(mk.m)
+
+
+# ---------- присланные файлы ----------
+
+def media_of(m):
+    """(вид, сведения) для документа или фото, иначе None."""
+    msg = m.get("message") or {}
+    doc = msg.get("documentMessage") or (
+        ((msg.get("documentWithCaptionMessage") or {}).get("message") or {}).get("documentMessage"))
+    if doc:
+        return "документ", doc
+    if msg.get("imageMessage"):
+        return "фото", msg["imageMessage"]
+    return None
+
+
+def size_of(v):
+    """Размер файла из сообщения: число, строка или Long из protobuf вида {"low": …, "high": …}."""
+    if isinstance(v, dict):
+        return (v.get("low") or 0) % 2 ** 32 + (v.get("high") or 0) * 2 ** 32
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def safe(s, n=100):
+    """Имя файла без запрещённых знаков; длинное обрезается без висящей скобки или тире на конце."""
+    return re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", s)[:n].strip().rstrip(" .(-—").strip() or "файл"
+
+
+def cmd_files(chat, hours):
+    """Скачивает присланные документы и фото во «входящие»: дата, время, отправитель, исходное имя файла.
+    Дальше их обрабатывает шлюз обезличивания, как любые входящие."""
+    if not ready():
+        warn_unlinked()
+    mk = Masker(load_map())
+    chats, alias = chat_list()
+    where = {"messageTimestamp": period(hours)}
+    if chat:
+        where["key"] = {"remoteJid": resolve(chat, chats, mk)}
+    done = set(FILES_DONE.read_text().split()) if FILES_DONE.exists() else set()
+    INBOX.mkdir(exist_ok=True)
+    got = 0
+    for m in sorted(messages(where, 2000), key=lambda m: int(m["messageTimestamp"])):
+        media = media_of(m)
+        if not media or m["key"].get("fromMe") or m["key"]["id"] in done:
+            continue
+        kind, info = media
+        sender = who(m.get("pushName"), mk)
+        jid = alias.get(m["key"]["remoteJid"], m["key"]["remoteJid"])
+        place = who((chats.get(jid) or {}).get("name"), mk) if jid.endswith("@g.us") else ""
+        head = f"  {when(m['messageTimestamp'])} {sender}" + (f" в «{place}»" if place else "")
+        if size_of(info.get("fileLength")) > BIG:
+            print(f"{head}: {kind} больше 50 МБ, не скачиваю")
+            continue
+        r = api("POST", f"/chat/getBase64FromMediaMessage/{NAME}", {"message": {"key": {"id": m["key"]["id"]}}},
+                check=False)
+        if not r or not r.get("base64"):
+            print(f"{head}: {kind} не скачался, WhatsApp его больше не отдаёт. Попросите прислать ещё раз.")
+            continue
+        name = pathlib.Path(info.get("fileName") or r.get("fileName") or kind)
+        ext = (name.suffix or mimetypes.guess_extension((r.get("mimetype") or info.get("mimetype") or "").split(";")[0])
+               or "").lower()
+        stamp = dt.datetime.fromtimestamp(int(m["messageTimestamp"])).strftime("%Y-%m-%d %H-%M")
+        path = INBOX / (safe(f"WA {stamp} {sender} — {name.stem}") + ext)
+        path.write_bytes(base64.b64decode(r["base64"]))
+        done.add(m["key"]["id"])
+        got += 1
+        print(f"{head}: {kind} → входящие/{path.name}")
+    FILES_DONE.parent.mkdir(mode=0o700, exist_ok=True)
+    FILES_DONE.write_text("\n".join(sorted(done)))
+    save_map(mk.m)
+    print(f"Скачано файлов: {got}." + (" Дальше: python3 tools/obezlichit.py inbox" if got else ""))
+
+
+# ---------- номер агента: сводки в группу руководителя ----------
+
+def cmd_group():
+    """Запоминает группу, где руководитель написал «сводки сюда». Номер агента должен быть в этой группе."""
+    if not ready():
+        sys.exit("Номер агента не привязан к шлюзу. Привяжите: python3 tools/whatsapp.py qr --agent")
+    chats, _ = chat_list()
+    hits = [m for m in messages({"messageTimestamp": period(72)}, 2000)
+            if m["key"]["remoteJid"].endswith("@g.us") and text_of(m).strip(" .!").casefold() == "сводки сюда"]
+    if not hits:
+        sys.exit("Не вижу слов «сводки сюда» ни в одной группе за 3 дня. Руководитель создаёт группу, добавляет в неё "
+                 "номер агента и пишет туда «сводки сюда». Потом повторите: python3 tools/whatsapp.py group")
+    jid = max(hits, key=lambda m: int(m["messageTimestamp"]))["key"]["remoteJid"]
+    name = (chats.get(jid) or {}).get("name") or "группа руководителя"
+    GROUP.parent.mkdir(mode=0o700, exist_ok=True)
+    GROUP.write_text(json.dumps({"jid": jid, "name": name}, ensure_ascii=False))
+    GROUP.chmod(0o600)
+    print(f"Сводки пойдут в группу «{name}». Номер агента пишет только туда.")
+
+
+def cmd_post(text, file=None):
+    """Сводка, картинка или файл в группу руководителя с номера агента. Другим людям номер агента не пишет."""
+    if not GROUP.exists():
+        sys.exit("Группа для сводок не выбрана. Руководитель пишет в свою группу «сводки сюда», "
+                 "потом: python3 tools/whatsapp.py group")
+    g = json.loads(GROUP.read_text())
+    text = (sys.stdin.read() if text == "-" else text or "").strip()
+    if not text and not file:
+        sys.exit("Пустой текст, отправлять нечего.")
+    if not ready():
+        sys.exit("Номер агента не привязан к шлюзу. Привяжите: python3 tools/whatsapp.py qr --agent")
+    mid = deliver(g["jid"], text, file)
+    print(f"Отправлено в группу «{g['name']}». Статус: {status_of(mid)}.")
 
 
 # ---------- команды ----------
@@ -626,21 +769,34 @@ def cmd_autostart(on):
 def main():
     ap = argparse.ArgumentParser(description="WhatsApp через шлюз на этом Mac")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for c in ("status", "qr", "stop", "install"):
+    for c in ("status", "qr"):
+        sub.add_parser(c).add_argument("--agent", action="store_true", help="номер агента")
+    for c in ("stop", "install", "group"):
         sub.add_parser(c)
     sub.add_parser("up").add_argument("--auto", action="store_true", help="запуск сторожем автозапуска")
     sub.add_parser("autostart").add_argument("mode", choices=["on", "off"])
     p = sub.add_parser("chats")
     p.add_argument("--hours", type=float, default=24)
+    p.add_argument("--agent", action="store_true", help="чаты номера агента")
+    p = sub.add_parser("files")
+    p.add_argument("chat", nargs="?")
+    p.add_argument("--hours", type=float, default=24)
+    p = sub.add_parser("post")
+    p.add_argument("text", nargs="?", default="")
+    p.add_argument("--file")
     p = sub.add_parser("read")
     p.add_argument("chat", nargs="?")
     p.add_argument("--hours", type=float, default=24)
     p.add_argument("--limit", type=int, default=200)
     p = sub.add_parser("send")
     p.add_argument("chat")
-    p.add_argument("text")
+    p.add_argument("text", nargs="?", default="")
     p.add_argument("--to", help="имя получателя, как в chats и read")
+    p.add_argument("--file", help="документ или фото")
     a = ap.parse_args()
+    global NAME
+    if getattr(a, "agent", False) or a.cmd in ("group", "post"):
+        NAME = AGENT
     if a.cmd != "status":  # одна команда за раз: сторож не перезапускает шлюз посреди отправки или привязки
         auto = a.cmd == "up" and a.auto
         if auto and not ENV.exists():
@@ -654,7 +810,13 @@ def main():
     if a.cmd == "read":
         return cmd_read(a.chat, a.hours, a.limit)
     if a.cmd == "send":
-        return cmd_send(a.chat, a.to, a.text)
+        return cmd_send(a.chat, a.to, a.text, a.file)
+    if a.cmd == "files":
+        return cmd_files(a.chat, a.hours)
+    if a.cmd == "group":
+        return cmd_group()
+    if a.cmd == "post":
+        return cmd_post(a.text, a.file)
     if a.cmd == "up":
         return cmd_up(a.auto)
     if a.cmd == "autostart":
