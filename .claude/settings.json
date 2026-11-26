@@ -1,5 +1,17 @@
 {
   "permissions": {
+    "allow": [
+      "Bash(python3 tools/whatsapp.py files:*)",
+      "Bash(python3 tools/whatsapp.py post:*)",
+      "Bash(python3 tools/whatsapp.py status:*)",
+      "Bash(python3 tools/whatsapp.py chats:*)",
+      "Bash(python3 tools/obezlichit.py inbox:*)",
+      "Bash(python3 tools/vagony.py:*)",
+      "Bash(python3 tools/kurs.py:*)",
+      "Bash(python3 tools/proverka_formul.py:*)",
+      "Bash(python3 tools/ceny.py:*)",
+      "Bash(python3 tools/kartinka.py:*)"
+    ],
     "deny": [
       "Bash(git push:*)",
       "Bash(sudo:*)",
